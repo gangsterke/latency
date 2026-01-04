@@ -1,0 +1,152 @@
+﻿FUNCTION_BLOCK "FB_EventTimer"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      eventID : DInt;   // Event identifier trigger
+      eventID_reset : Bool;   // Ready command trigger (second event)
+      reset : Bool;   // Reset input to clear log
+   END_VAR
+
+   VAR_OUTPUT 
+      elapsedTime_ms : DInt;   // Elapsed time in milliseconds
+      measurementValid : Bool;   // Indicates if measurement is valid
+      logCount : Int;   // Number of measurements in log State machine
+   END_VAR
+
+   VAR 
+      state : Int := 0;
+      lastEventID : DInt;   // Timing variables
+      startTime : Time;
+      endTime : Time;
+      currentTime : Time;   // Edge detection
+      eventID_Old : DInt;
+      eventID_reset_old : Bool;
+      reset_Old : Bool;
+      eventID_Edge : Bool;
+      eventID_reset_RisingEdge : Bool;   // Changed to falling edge
+      reset_Edge : Bool;   // Logging array for last 100 measurements
+      log : Array[0..99] of Struct
+         eventID : DInt;
+         elapsedTime_ms : DInt;
+         timestamp {InstructionName := 'DTL'; LibVersion := '1.0'} : DTL;
+      END_STRUCT;
+      logIndex : Int := 0;
+      logFull : Bool := FALSE;
+   END_VAR
+
+   VAR_TEMP 
+      tempTime : Time;
+      i : Int;
+      retVal : Int;
+   END_VAR
+
+
+BEGIN
+	//=============================================================================
+	// FB_EventTimer - Measures time between two events
+	//
+	// Description:
+	// This function block measures the elapsed time between two events:
+	// 1. Rising edge of eventID (first event - starts timer)
+	// 2. Falling edge of RdyCmd (second event - stops timer)
+	// 
+	// The measurement result is stored and logged in a circular buffer
+	// for the last 100 measurements.
+	//
+	// Reset: Rising edge on reset input clears all log entries
+	//=============================================================================
+	
+	// Edge detection for reset
+	#reset_Edge := #reset AND NOT #reset_Old;
+	#reset_Old := #reset;
+	
+	// Handle reset - clear all log entries
+	IF #reset_Edge THEN
+	    FOR #i := 0 TO 99 DO
+	        #log[#i].eventID := 0;
+	        #log[#i].elapsedTime_ms := 0;
+	        #log[#i].timestamp.YEAR := 1970;
+	        #log[#i].timestamp.MONTH := 1;
+	        #log[#i].timestamp.DAY := 1;
+	        #log[#i].timestamp.HOUR := 0;
+	        #log[#i].timestamp.MINUTE := 0;
+	        #log[#i].timestamp.SECOND := 0;
+	        #log[#i].timestamp.NANOSECOND := 0;
+	    END_FOR;
+	    
+	    #logIndex := 0;
+	    #logFull := FALSE;
+	    #logCount := 0;
+	    #elapsedTime_ms := 0;
+	    #measurementValid := FALSE;
+	    #state := 0;
+	END_IF;
+	
+	// Edge detection for eventID
+	#eventID_Edge := (#eventID <> #eventID_Old) AND (#eventID <> 0);
+	#eventID_Old := #eventID;
+	
+	// Edge detection for RdyCmd - FALLING EDGE (TRUE to FALSE)
+	#eventID_reset_RisingEdge :=  #eventID_reset AND NOT #eventID_reset_old;
+	#eventID_reset_old := #eventID_reset;
+	
+	// State machine for time measurement
+	CASE #state OF
+	    0:  // IDLE - Waiting for first event (eventID)
+	        IF #eventID_Edge THEN
+	            // First event detected - start timing
+	            #startTime := TIME_TCK();
+	            #lastEventID := #eventID;
+	            #state := 1;
+	            #measurementValid := FALSE;
+	        END_IF;
+	        
+	    1:  // TIMING - Waiting for second event (RdyCmd falling edge)
+	        IF #eventID_reset_RisingEdge THEN
+	            // Second event detected (RdyCmd reset) - stop timing
+	            #endTime := TIME_TCK();
+	            
+	            // Calculate elapsed time
+	            #tempTime := #endTime - #startTime;
+	            #elapsedTime_ms := TIME_TO_DINT(#tempTime);
+	            
+	            // Store in log
+	            #log[#logIndex].eventID := #lastEventID;
+	            #log[#logIndex].elapsedTime_ms := #elapsedTime_ms;
+	            #retVal := RD_LOC_T(OUT => #log[#logIndex].timestamp);
+	            
+	            // Update log index (circular buffer)
+	            #logIndex := #logIndex + 1;
+	            IF #logIndex >= 100 THEN
+	                #logIndex := 0;
+	                #logFull := TRUE;
+	            END_IF;
+	            
+	            // Update log count
+	            IF #logFull THEN
+	                #logCount := 100;
+	            ELSE
+	                #logCount := #logIndex;
+	            END_IF;
+	            
+	            #measurementValid := TRUE;
+	            #state := 0;
+	            
+	        ELSIF #eventID_Edge THEN
+	            // New eventID before RdyCmd reset - restart measurement
+	            #startTime := TIME_TCK();
+	            #lastEventID := #eventID;
+	            #measurementValid := FALSE;
+	        END_IF;
+	        
+	END_CASE;
+	
+	// Calculate current elapsed time while in TIMING state (for monitoring)
+	IF #state = 1 THEN
+	    #currentTime := TIME_TCK();
+	    #tempTime := #currentTime - #startTime;
+	    #elapsedTime_ms := TIME_TO_DINT(#tempTime);
+	END_IF;
+	
+END_FUNCTION_BLOCK
+
